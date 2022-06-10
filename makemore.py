@@ -19,6 +19,8 @@ from torch.utils.data import Dataset
 from torch.utils.data.dataloader import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
+from einops import rearrange, repeat, reduce, asnumpy
+
 # -----------------------------------------------------------------------------
 # GPT (PyTorch) model definition
 
@@ -70,17 +72,31 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        k = self.key(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = self.query(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = self.value(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        # _k = self.key(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        k = rearrange(self.key(x), 'B T (nh hs) -> B nh T hs', nh=self.n_head)
+        # _q = self.query(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q = rearrange(self.query(x), 'B T (nh hs) -> B nh T hs', nh=self.n_head)
+        # _v = self.value(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        v = rearrange(self.value(x), 'B T (nh hs) -> B nh T hs', nh=self.n_head)
+        # assert torch.allclose(_k, k)
+        # assert torch.allclose(_q, q)
+        # assert torch.allclose(_v, v)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        # _att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        att = torch.einsum('bhlt,bhvt->bhlv', [q, k]) * (1.0 / math.sqrt(k.size(-1)))
+        # assert torch.allclose(_att, att)
+        # _att = att.masked_fill(self.mask[:,:,:T,:T] == 0, float('-inf'))
         att = att.masked_fill(self.mask[:,:,:T,:T] == 0, float('-inf'))
+        # _att = F.softmax(att, dim=-1)
         att = F.softmax(att, dim=-1)
+        # _att = self.attn_drop(att)
         att = self.attn_drop(att)
-        y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+        #_y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        #_y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+        y = torch.einsum('bhlt,bhtv->bhlv', [att, v])
+        y = rearrange(y, 'B nh T hs -> B T (nh hs)')
+        # assert torch.allclose(y, _y)
 
         # output projection
         y = self.resid_drop(self.proj(y))
